@@ -2,11 +2,15 @@
 //
 //		fgui.c -- the program's window, drawn with Nuklear on SDL2, after the
 //		emulator's nkwin.c. Three pages: make an image, write one to a floppy,
-//		read a floppy to one.
+//		read a floppy and see what it holds.
 //
 //		What the make page makes stays in memory (fjob_set). From there it goes
 //		straight to a floppy, or to an image file if the user chooses to save
 //		it, or both. No file is needed along the way.
+//
+//		The read page works the same way: the floppy goes into memory and its
+//		contents are listed, and only then does the user decide whether to save
+//		it. Nothing that was read is thrown away without asking.
 //
 //		The transfers run on a thread of their own, so the window keeps drawing
 //		the progress and can offer Cancel; while one runs, everything that
@@ -90,6 +94,11 @@ typedef struct
 
 static test_click clicks[MAX_CLICKS];
 static int        nclicks;
+static int        shot_frame = 4;
+
+#define SHOT_FRAME shot_frame
+#else
+#define SHOT_FRAME 4
 #endif
 
 //------------------------------------------------------------------------------
@@ -128,7 +137,17 @@ static int       write_src = SRC_FILE;
 static int       write_disk = 1;              // which image of the set, from 1
 static char      write_img[FPLAT_PATH + 16];  // "_12of34" may be added to a path
 static char      write_info[1024];
-static char      read_out[FPLAT_PATH];
+static char      read_out[FPLAT_PATH];    // the name offered when saving
+static int       read_out_given;          // it was asked for, so do not suggest one
+static uint8_t  *read_img;                // the floppy last read, in memory
+static size_t    read_len;
+static int       read_saved;              // and it is in a file too
+static int       read_nbad;               // sectors it could not read
+static int       read_first_bad;          // sector 0 among them
+static int       read_top;                // go to the top of the list
+static fimg_info read_info;
+static fimg_item read_items[FIMG_LIST_MAX];
+static int       read_nitems;
 
 static char      log_text[LOG_LINES][LOG_LEN];
 static int       log_n;
@@ -138,6 +157,8 @@ static fjob         job;
 static SDL_Thread  *job_thread;
 static int          job_is_write;
 static const uint8_t *job_mem;     // the image to write, when it is in memory
+static uint8_t     *job_read;      // what a read got, until job_poll takes it
+static size_t       job_read_len;
 static char         job_drive[32];
 static char         job_path[FPLAT_PATH];
 
@@ -202,7 +223,7 @@ static int job_main( void *arg )
 	}
 	else
 	{
-		fjob_read( &job, job_drive, job_path );
+		fjob_read_mem( &job, job_drive, &job_read, &job_read_len );
 	}
 	return 0;
 }
@@ -210,8 +231,8 @@ static int job_main( void *arg )
 /**
   * @brief  Start a transfer on its thread.
   *
-  * @param  write 1 to write the image, 0 to read the floppy.
-  * @param  path The image file; ignored when mem is given.
+  * @param  write 1 to write the image, 0 to read the floppy into memory.
+  * @param  path The image file to write; ignored when mem is given, and by a read.
   * @param  mem The image to write, in memory, or NULL.
   *
   * @retval None.
@@ -320,6 +341,38 @@ static void write_info_update( void )
 }
 
 /**
+  * @brief  Take what a read got: it replaces the floppy read before.
+  *
+  * @retval None.
+  */
+static void read_take( void )
+{
+	int i;
+
+	free( read_img );
+	read_img = job_read;
+	read_len = job_read_len;
+	job_read = NULL;
+	read_saved = 0;
+	read_nbad = job.nbad;
+	read_first_bad = 0;
+	for ( i = 0; i < job.nbad; i++ )
+	{
+		read_first_bad |= job.bad[i] == 0;
+	}
+	fimg_inspect( read_img, read_len, &read_info );
+	read_nitems = fimg_list( read_img, read_len, read_items, FIMG_LIST_MAX );
+	read_top = 1;
+	if ( !read_out_given )
+	{
+		// a new name, in the folder of the last save
+		size_t at = (size_t)( fplat_base( read_out ) - read_out );
+
+		fimg_image_name( &read_info, read_out + at, sizeof read_out - at );
+	}
+}
+
+/**
   * @brief  Collect a finished transfer and report it.
   *
   * @retval None.
@@ -352,10 +405,7 @@ static void job_poll( void )
 	}
 	if ( !job_is_write && job.result == FJOB_OK )
 	{
-		snprintf( write_img, sizeof write_img, "%s", job_path );
-		write_src = SRC_FILE;
-		write_info_update();
-		log_add( write_info );
+		read_take();
 	}
 	if ( job_mem != NULL && job.result == FJOB_OK && write_disk < made.disks )
 	{
@@ -1543,47 +1593,203 @@ static void write_ui( void )
 }
 
 /**
-  * @brief  Draw the read page.
+  * @brief  The Read floppy button: start reading into memory.
+  *
+  * The floppy read before stays until this read succeeds, so a Cancel or an empty
+  * drive loses nothing.
   *
   * @retval None.
   */
-static void read_ui( void )
+static void read_go( void )
 {
-	static const float r[3] = { 0.14f, 0.68f, 0.18f };
-	int ok = drive_ui();
+	char line[LOG_LEN];
 
-	row_ratio( 3, r );
-	nk_label( ctx, "Image file:", NK_TEXT_LEFT );
-	nk_edit_string_zero_terminated( ctx, NK_EDIT_FIELD, read_out, (int)sizeof read_out, nk_filter_default );
-	if ( button( "Browse...", !job_running() ) )
+	if ( read_img != NULL && !read_saved &&
+	     !ask( "Read floppy", "The floppy read last has not been saved. Read another and lose it?", "Read" ) )
 	{
-		pick_file( "Save the floppy as", PICK_SAVE, IMG_FILTER, read_out, sizeof read_out );
+		return;
 	}
-	paragraph( "The drive is opened read-only. A sector that stays unreadable after retries is saved as zeros and "
-	           "reported below; the image is written anyway, so what can be saved is saved.", 100 );
+	snprintf( line, sizeof line, "Reading %.100s into memory", drives[drive_sel].label );
+	log_add( line );
+	job_start( 0, "", NULL );
+}
+
+/**
+  * @brief  The Save button: put the floppy read into a file.
+  *
+  * The saved file also becomes the write page's image, ready to copy the floppy.
+  *
+  * @retval None.
+  */
+static void read_save( void )
+{
+	char msg[FPLAT_PATH + 64];
+
+	if ( pick_file( "Save the floppy as", PICK_SAVE, IMG_FILTER, read_out, sizeof read_out ) != 0 )
+	{
+		return;
+	}
+#ifndef _WIN32
+	// Windows' own dialog has asked already
+	if ( fplat_is_regular( read_out, NULL ) )
+	{
+		snprintf( msg, sizeof msg, "%s exists. Replace it?", read_out );
+		if ( !ask( "Save image", msg, "Replace" ) )
+		{
+			return;
+		}
+	}
+#endif
+	if ( fjob_save( read_img, read_len, read_out, msg, sizeof msg ) != 0 )
+	{
+		log_add( msg );
+		return;
+	}
+	log_add( msg );
+	if ( read_nbad )
+	{
+		snprintf( msg, sizeof msg, "It has %d unreadable sector(s), zeros in the image.", read_nbad );
+		log_add( msg );
+	}
+	read_saved = 1;
+	snprintf( write_img, sizeof write_img, "%s", read_out );
+	write_src = SRC_FILE;
+	write_info_update();
+}
+
+/**
+  * @brief  Draw what the floppy read holds.
+  *
+  * @param  h The list's height.
+  *
+  * @retval None.
+  */
+static void read_list_ui( float h )
+{
+	static const float r[3] = { 0.34f, 0.50f, 0.16f };
+	const char *empty = NULL;
+	int i;
+
+	nk_layout_row_dynamic( ctx, h, 1 );
+	if ( read_top )
+	{
+		nk_group_set_scroll( ctx, "read_list", 0, 0 );
+		read_top = 0;
+	}
+	if ( !nk_group_begin( ctx, "read_list", NK_WINDOW_BORDER ) )
+	{
+		return;
+	}
+	if ( job_running() )
+	{
+		empty = "Reading the floppy...";
+	}
+	else if ( read_img == NULL )
+	{
+		empty = "Nothing read yet. Put a floppy in the drive, then press Read floppy.";
+	}
+	else if ( read_nitems == 0 )
+	{
+		empty = "Nothing on this floppy to list.";
+	}
+	if ( empty != NULL )
+	{
+		nk_layout_row_dynamic( ctx, 20, 1 );
+		nk_label( ctx, empty, NK_TEXT_LEFT );
+		nk_group_end( ctx );
+		return;
+	}
+	nk_layout_row( ctx, NK_DYNAMIC, 20, 3, r );
+	nk_label( ctx, "Name", NK_TEXT_LEFT );
+	nk_label( ctx, "What it is", NK_TEXT_LEFT );
+	nk_label( ctx, "Size", NK_TEXT_RIGHT );
+	for ( i = 0; i < read_nitems; i++ )
+	{
+		const fimg_item *it = &read_items[i];
+		char name[48], size[24] = "";
+
+		snprintf( name, sizeof name, "%s%.31s", it->inside ? "      " : "", it->name );
+		if ( it->size >= 1024 )
+		{
+			snprintf( size, sizeof size, "%u KB", (unsigned)( ( it->size + 1023 ) / 1024 ) );
+		}
+		else if ( it->size > 0 )
+		{
+			snprintf( size, sizeof size, "%u bytes", (unsigned)it->size );
+		}
+		nk_layout_row( ctx, NK_DYNAMIC, 20, 3, r );
+		nk_label( ctx, name, NK_TEXT_LEFT );
+		nk_label( ctx, it->what, NK_TEXT_LEFT );
+		nk_label( ctx, size, NK_TEXT_RIGHT );
+	}
+	nk_group_end( ctx );
+}
+
+/**
+  * @brief  Draw the read page.
+  *
+  * @param  h The page's height.
+  *
+  * @retval None.
+  */
+static void read_ui( float h )
+{
+	static const float act_row[3] = { 0.40f, 0.30f, 0.30f };
+	char text[FPLAT_PATH + 64];
+	int ok = drive_ui();
+	float list_h = h - 4 * ROW - 3 * TEXT_LINE - 56;
+
+	paragraph( "The drive is opened read-only and the floppy goes into memory: nothing reaches the PC's disk unless you "
+	           "save it. A sector that stays unreadable after retries becomes zeros and is reported below.", 100 );
+
+	if ( ndrives == 0 )
+	{
+		list_h -= 2 * TEXT_LINE + 4;  // drive_ui's note
+	}
+	if ( read_img == NULL || job_running() )
+	{
+		snprintf( text, sizeof text, "What the floppy holds:" );
+	}
+	else if ( read_first_bad )
+	{
+		snprintf( text, sizeof text, "The floppy's first sector cannot be read, so what it holds cannot be told." );
+	}
+	else
+	{
+		snprintf( text, sizeof text, "%.*s", (int)strcspn( read_info.text, "\n" ), read_info.text );
+	}
+	paragraph( text, 100 );
+	if ( read_img != NULL && !job_running() && read_nbad )
+	{
+		snprintf( text, sizeof text, "%d sector(s) cannot be read, zeros in the image: this list may be wrong or "
+		          "short, and whatever used them is damaged.", read_nbad );
+		paragraph( text, 100 );
+		list_h -= 2 * TEXT_LINE + 4;
+	}
+	read_list_ui( list_h < 60 ? 60 : list_h );
 
 	progress_ui();
-	row_eq( 3 );
-	nk_spacing( ctx, 2 );
-	if ( button( "Read floppy", ok && read_out[0] && !job_running() ) )
+	row_ratio( 3, act_row );
+	if ( read_img == NULL )
 	{
-		int go = 1;
-
-		if ( fplat_is_regular( read_out, NULL ) )
-		{
-			char q[FPLAT_PATH + 64];
-
-			snprintf( q, sizeof q, "%s exists. Replace it?", read_out );
-			go = ask( "Read floppy", q, "Replace" );
-		}
-		if ( go )
-		{
-			char line[LOG_LEN];
-
-			snprintf( line, sizeof line, "Reading %s to %s", drives[drive_sel].label, fplat_base( read_out ) );
-			log_add( line );
-			job_start( 0, read_out, NULL );
-		}
+		snprintf( text, sizeof text, "Nothing in memory." );
+	}
+	else if ( read_saved )
+	{
+		snprintf( text, sizeof text, "Saved as %s", fplat_base( read_out ) );
+	}
+	else
+	{
+		snprintf( text, sizeof text, "In memory, not saved." );
+	}
+	nk_label( ctx, text, NK_TEXT_LEFT );
+	if ( button( "Read floppy", ok && !job_running() ) )
+	{
+		read_go();
+	}
+	if ( button( "Save as image file...", read_img != NULL && !job_running() ) )
+	{
+		read_save();
 	}
 }
 
@@ -1671,7 +1877,7 @@ static void ui( void )
 			write_ui();
 			break;
 		case TAB_READ:
-			read_ui();
+			read_ui( page_h );
 			break;
 		default:
 			make_ui( page_h );
@@ -1784,6 +1990,7 @@ void fgui_preset( int dos, const char *file, const char *image, const char *out 
 	{
 		snprintf( make_out, sizeof make_out, "%s", out );
 		snprintf( read_out, sizeof read_out, "%s", out );
+		read_out_given = 1;
 	}
 	if ( file != NULL )
 	{
@@ -1808,6 +2015,11 @@ void fgui_test_click( int frame, int x, int y )
 		nclicks++;
 	}
 }
+
+void fgui_test_shot( int frame )
+{
+	shot_frame = frame;
+}
 #endif
 
 int fgui_run( const char *smoke, int start_tab )
@@ -1825,7 +2037,7 @@ int fgui_run( const char *smoke, int start_tab )
 
 	for ( ;; )
 	{
-		const char *shot = smoke != NULL && frames == 4 ? smoke : NULL;
+		const char *shot = smoke != NULL && frames == SHOT_FRAME ? smoke : NULL;
 
 		job_poll();
 #ifdef FDR_TEST_DRIVE
@@ -1848,7 +2060,12 @@ int fgui_run( const char *smoke, int start_tab )
 			close_asked = 0;
 			if ( !job_running() )
 			{
-				break;
+				if ( read_img == NULL || read_saved ||
+				     ask( "Quit", "The floppy you read has not been saved. Quit and lose it?", "Quit" ) )
+				{
+					break;
+				}
+				continue;
 			}
 			if ( ask( "Quit", "A transfer is running. Stop it? A floppy being written will be incomplete.", "Stop" ) )
 			{
@@ -1868,6 +2085,8 @@ int fgui_run( const char *smoke, int start_tab )
 		SDL_free( drops[frames] );
 	}
 	fjob_set_free( &made );
+	free( read_img );
+	free( job_read );
 	nk_sdl_shutdown();
 	SDL_DestroyRenderer( ren );
 	SDL_DestroyWindow( win );

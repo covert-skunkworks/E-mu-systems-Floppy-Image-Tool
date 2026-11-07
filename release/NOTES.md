@@ -1,5 +1,8 @@
 Floppy disks for E-mu samplers on EOS before its FAT32 support: make images, write them to a real floppy with a read-back
-verify, and save real floppies to images.
+verify, and read real floppies, see what they hold and save them to images.
+
+**New in 1.1:** the Read floppy page reads into memory first and lists what the floppy holds (files, presets, samples, sequences).
+Saving it as an image is now a separate choice afterwards. `-info` gives the same list on the command line.
 
 | Download | System |
 |---|---|

@@ -16,7 +16,8 @@
   * @param  dos 1 for the DOS format on the make page.
   * @param  file A file to add to the make page's list, may be NULL.
   * @param  image The image on the write page, may be NULL.
-  * @param  out The image file on the make and read pages, may be NULL.
+  * @param  out The name offered when saving on the make and read pages, may be
+  *         NULL.
   *
   * @retval None.
   */
@@ -33,6 +34,16 @@ void fgui_preset( int dos, const char *file, const char *image, const char *out 
   * @retval None.
   */
 void fgui_test_click( int frame, int x, int y );
+
+/**
+  * @brief  Choose the frame -smoke saves, in the test build only, so a click and
+  *         what follows from it can be seen.
+  *
+  * @param  frame The frame.
+  *
+  * @retval None.
+  */
+void fgui_test_shot( int frame );
 #endif
 
 /**

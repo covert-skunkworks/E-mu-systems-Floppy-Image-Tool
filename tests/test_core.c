@@ -32,6 +32,9 @@
 
 #define CHECK( c ) check( ( c ) != 0, #c, __LINE__ )
 
+#define BANK_LEN       1000
+#define LISTED_ENTRIES 5
+
 //------------------------------------------------------------------------------
 //------------------------------ Local variables -------------------------------
 //------------------------------------------------------------------------------
@@ -375,6 +378,159 @@ static void test_make( void )
 }
 
 /**
+  * @brief  Make a bank with a table of contents: a multisetup, which is not listed,
+  *         two presets, a sequence and a sample.
+  *
+  * @param  b Receives the bank, BANK_LEN bytes.
+  *
+  * @retval None.
+  */
+static void make_listed_bank( uint8_t *b )
+{
+	static const struct
+	{
+		const char *tag;
+		int         index;
+		const char *name;
+		int         size;
+	} e[LISTED_ENTRIES] =
+	{
+		{ "E4Ma", 0, "                ", 258 },
+		{ "E4P1", 0, "Grand Piano     ", 1394 },
+		{ "E4P1", 7, "Strings         ", 2000 },
+		{ "E4s1", 0, "Song            ", 132 },
+		{ "E3S1", 1, "Piano C3        ", 70000 }
+	};
+	int i;
+
+	memset( b, 0, BANK_LEN );
+	memcpy( b, "FORM", 4 );
+	b[6] = (BANK_LEN - 12) >> 8;
+	b[7] = (BANK_LEN - 12) & 0xFF;
+	memcpy( b + 8, "E4B0", 4 );
+	memcpy( b + 12, "TOC1", 4 );
+	b[19] = LISTED_ENTRIES * 32;
+	for ( i = 0; i < LISTED_ENTRIES; i++ )
+	{
+		uint8_t *t = b + 20 + i * 32;
+
+		memcpy( t, e[i].tag, 4 );
+		t[5] = (uint8_t)( e[i].size >> 16 );
+		t[6] = (uint8_t)( e[i].size >> 8 );
+		t[7] = (uint8_t)e[i].size;
+		t[13] = (uint8_t)e[i].index;
+		memcpy( t + 14, e[i].name, 16 );
+	}
+}
+
+/**
+  * @brief  What the read page lists, and the name it suggests.
+  *
+  * @retval None.
+  */
+static void test_contents( void )
+{
+	static fimg_item it[64];
+	uint8_t *b = malloc( BANK_LEN );
+	uint8_t *big = make_bank( (size_t)FIMG_EOS_DISK_BYTES + 5000 );
+	fimg_info info;
+	char name[64];
+	int n;
+
+	make_listed_bank( b );
+
+	// an EOS floppy: the bank, then what its table of contents lists
+	CHECK( fimg_eos_disk( img, "Listed", b, BANK_LEN, 1 ) == 0 );
+	n = fimg_list( img, FIMG_SIZE_144, it, 64 );
+	CHECK( n == 5 );
+	CHECK( strcmp( it[0].name, "Listed" ) == 0 && it[0].size == BANK_LEN && !it[0].inside );
+	CHECK( strcmp( it[0].what, "Bank E4B0: 2 presets, 1 sample, 1 sequence" ) == 0 );
+	CHECK( strcmp( it[1].name, "P000 Grand Piano" ) == 0 && strcmp( it[1].what, "Preset" ) == 0 );
+	CHECK( it[1].size == 1394 && it[1].inside );
+	CHECK( strcmp( it[2].name, "P007 Strings" ) == 0 );
+	CHECK( strcmp( it[3].name, "s000 Song" ) == 0 && strcmp( it[3].what, "Sequence" ) == 0 );
+	CHECK( strcmp( it[4].name, "S001 Piano C3" ) == 0 && strcmp( it[4].what, "Sample" ) == 0 && it[4].size == 70000 );
+
+	// the list stops where it runs out of room, and says so
+	n = fimg_list( img, FIMG_SIZE_144, it, 3 );
+	CHECK( n == 3 && strcmp( it[2].name, "..." ) == 0 );
+
+	// a bad sector reads as zeros: entries after it are not trusted
+	memset( img + 512 + 20 + 2 * 32, 0, 32 );
+	n = fimg_list( img, FIMG_SIZE_144, it, 64 );
+	CHECK( n == 2 && strcmp( it[0].what, "Bank E4B0: 1 preset, 0 samples" ) == 0 );
+
+	// a table of contents that does not fit is not followed
+	CHECK( fimg_eos_disk( img, "Listed", b, BANK_LEN, 1 ) == 0 );
+	img[512 + 16] = 0xFF;
+	img[512 + 17] = 0xFF;
+	img[512 + 18] = 0xFF;
+	img[512 + 19] = 0xE0;
+	n = fimg_list( img, FIMG_SIZE_144, it, 64 );
+	CHECK( n == 1 && strstr( it[0].what, "cannot be read" ) != NULL );
+
+	// a bank that says it is short: its table of contents is cut off with it
+	CHECK( fimg_eos_disk( img, "Listed", b, BANK_LEN, 1 ) == 0 );
+	img[0x30] = img[0x31] = img[0x32] = 0;
+	img[0x33] = 40;
+	n = fimg_list( img, FIMG_SIZE_144, it, 64 );
+	CHECK( n == 1 && strstr( it[0].what, "cannot be read" ) != NULL );
+
+	// a name with bytes that cannot be shown
+	CHECK( fimg_eos_disk( img, "Listed", b, BANK_LEN, 1 ) == 0 );
+	img[512 + 20 + 32 + 14] = 0x07;
+	CHECK( fimg_list( img, FIMG_SIZE_144, it, 64 ) == 5 && strcmp( it[1].name, "P000 ?rand Piano" ) == 0 );
+
+	// disk 2 of a set has no table of contents
+	CHECK( fimg_eos_disk( img, "Set", big, (size_t)FIMG_EOS_DISK_BYTES + 5000, 2 ) == 0 );
+	n = fimg_list( img, FIMG_SIZE_144, it, 64 );
+	CHECK( n == 1 && strcmp( it[0].what, "Bank E4B0, disk 2 of 2: disk 1 lists it" ) == 0 );
+	fimg_inspect( img, FIMG_SIZE_144, &info );
+	fimg_image_name( &info, name, sizeof name );
+	CHECK( strcmp( name, "Set_2of2.img" ) == 0 );
+
+	// a DOS floppy: every file, and inside the banks
+	fimg_fat_blank( img, "SONGS" );
+	CHECK( fimg_fat_add( img, "BANK.E4B", b, BANK_LEN, 0, NULL ) == 0 );
+	CHECK( fimg_fat_add( img, "NOTE.TXT", big + 100, 300, 0, NULL ) == 0 );
+	n = fimg_list( img, FIMG_SIZE_144, it, 64 );
+	CHECK( n == 6 );
+	CHECK( strcmp( it[0].name, "BANK.E4B" ) == 0 && it[0].size == BANK_LEN && strstr( it[0].what, "2 presets" ) != NULL );
+	CHECK( strcmp( it[1].name, "P000 Grand Piano" ) == 0 && it[1].inside );
+	CHECK( strcmp( it[5].name, "NOTE.TXT" ) == 0 && strcmp( it[5].what, "File" ) == 0 && it[5].size == 300 && !it[5].inside );
+	fimg_inspect( img, FIMG_SIZE_144, &info );
+	fimg_image_name( &info, name, sizeof name );
+	CHECK( strcmp( name, "SONGS.img" ) == 0 );
+
+	// nothing to list
+	fimg_fat_blank( img, NULL );
+	CHECK( fimg_list( img, FIMG_SIZE_144, it, 64 ) == 0 );
+	fimg_eos_blank( img );
+	CHECK( fimg_list( img, FIMG_SIZE_144, it, 64 ) == 0 );
+	fimg_inspect( img, FIMG_SIZE_144, &info );
+	fimg_image_name( &info, name, sizeof name );
+	CHECK( strcmp( name, "floppy.img" ) == 0 );
+	CHECK( fimg_list( img, 1000, it, 64 ) == 0 );
+
+	// 720 KB is said, and an image of it is not read past its end
+	fimg_eos_blank( img );
+	CHECK( fimg_list( img, FIMG_SIZE_720, it, 64 ) == 1 && strstr( it[0].what, "No EOS" ) != NULL );
+
+	// a name off a floppy may hold anything, but not a way out of the folder
+	memset( &info, 0, sizeof info );
+	info.kind = FIMG_KIND_FAT12;
+	snprintf( info.name, sizeof info.name, "..\\a:b*/c" );
+	fimg_image_name( &info, name, sizeof name );
+	CHECK( strcmp( name, ".._a_b__c.img" ) == 0 );
+	snprintf( info.name, sizeof info.name, ".." );
+	fimg_image_name( &info, name, sizeof name );
+	CHECK( strcmp( name, "floppy.img" ) == 0 );
+
+	free( b );
+	free( big );
+}
+
+/**
   * @brief  The transfers on the stand-in drive, and what stops them.
   *
   * @retval None.
@@ -387,7 +543,7 @@ static void test_jobs( void )
 	size_t len = 0;
 	fdr_drive drv[FDR_MAX_DRIVES];
 	fdr_handle *h = NULL;
-	char err[256];
+	char err[256], msg[FPLAT_PATH + 64];
 	int i, n;
 	char image[FPLAT_PATH], fake[FPLAT_PATH], out[FPLAT_PATH];
 
@@ -431,6 +587,33 @@ static void test_jobs( void )
 	CHECK( fjob_read( &job, FDR_FAKE_ID, out ) == FJOB_OK && job.nbad == 0 );
 	CHECK( fplat_read_file( out, &d, &len, FIMG_SIZE_144 ) == 0 && memcmp( d, img, FIMG_SIZE_144 ) == 0 );
 	free( d );
+
+	// into memory, what the Read page does: it makes no file, then saves on request
+	remove( out );
+	CHECK( fjob_read_mem( &job, FDR_FAKE_ID, &d, &len ) == FJOB_OK && job.nbad == 0 );
+	CHECK( job.phase == FJOB_FINISHED && job.done == FIMG_SECTORS_144 );
+	CHECK( d != NULL && len == FIMG_SIZE_144 && memcmp( d, img, FIMG_SIZE_144 ) == 0 );
+	CHECK( !fplat_is_regular( out, NULL ) );
+	CHECK( fjob_save( d, len, out, msg, sizeof msg ) == 0 && strstr( msg, "Saved" ) != NULL );
+	free( d );
+	CHECK( fplat_read_file( out, &d, &len, FIMG_SIZE_144 ) == 0 && memcmp( d, img, FIMG_SIZE_144 ) == 0 );
+	free( d );
+
+	// and with bad sectors, the same
+	CHECK( fdr_fake_set( fake, bad, 2, NULL, 0 ) == 0 );
+	CHECK( fjob_read_mem( &job, FDR_FAKE_ID, &d, &len ) == FJOB_OK && job.nbad == 2 );
+	CHECK( d[5 * 512] == 0 && memcmp( d, img, 5 * 512 ) == 0 && strstr( job.message, "2 unreadable" ) != NULL );
+	free( d );
+
+	// a read that is cancelled keeps nothing
+	job.cancel = 1;
+	d = img2;
+	CHECK( fjob_read_mem( &job, FDR_FAKE_ID, &d, &len ) == FJOB_E_CANCELLED && d == NULL && len == 0 );
+	job.cancel = 0;
+
+	// no drive: nothing, and it says why
+	d = img2;
+	CHECK( fjob_read_mem( &job, "image.img", &d, &len ) == FJOB_E_DRIVE && d == NULL && job.message[0] != 0 );
 
 	// bad sectors while reading: reported, zeros in the image, the rest intact
 	CHECK( fdr_fake_set( fake, bad, 2, NULL, 0 ) == 0 );
@@ -555,6 +738,7 @@ static void test_write_targets( void )
 	{
 		CHECK( fplat_write_file( tried[i], img, 16 ) == -2 );
 		CHECK( fjob_set_save( &set, tried[i], msg, sizeof msg ) == -1 && strstr( msg, "Refused" ) != NULL );
+		CHECK( fjob_save( img, 16, tried[i], msg, sizeof msg ) == -1 && strstr( msg, "Refused" ) != NULL );
 
 		// refused before the drive is touched, not after a long read
 		CHECK( fjob_read( &job, FDR_FAKE_ID, tried[i] ) == FJOB_E_OUTPUT );
@@ -623,6 +807,7 @@ int main( int argc, char **argv )
 	test_order();
 	test_fat();
 	test_make();
+	test_contents();
 	test_jobs();
 	test_refusals();
 	test_write_targets();

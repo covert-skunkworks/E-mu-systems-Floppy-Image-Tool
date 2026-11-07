@@ -12,8 +12,10 @@ Double-click the program. Three pages:
   Write to floppy   Writes what you made, or an image file, to a real floppy, then
                     reads it all back and compares. It asks first, naming the
                     drive and the image.
-  Read floppy       Saves a real floppy to an image file and reports any bad
-                    sectors. The drive is opened read-only.
+  Read floppy       Reads a real floppy into memory and shows what it holds: its
+                    files, and the presets, samples and sequences of its banks.
+                    Any bad sectors are reported. Then you choose whether to save
+                    it as an image file. The drive is opened read-only.
 
 Only real floppy drives are ever offered: never hard disks, USB sticks or memory
 cards. The floppy has to be formatted already, on the sampler or on a PC.

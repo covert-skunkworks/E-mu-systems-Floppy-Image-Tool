@@ -1,7 +1,8 @@
 //  Description:
 //
 //		fjob.h -- the program's work, without its window: making floppy images
-//		in memory, saving them, and copying a whole floppy to and from an image.
+//		in memory, saving them, and copying a whole floppy to and from an image
+//		(in memory or in a file).
 //		The GUI runs the transfers on a thread of their own and watches the
 //		progress fields; the command line and the tests call them directly.
 //
@@ -128,20 +129,46 @@ int fjob_set_save( const fjob_set *s, const char *path, char *msg, unsigned n );
 void fjob_set_free( fjob_set *s );
 
 /**
-  * @brief  Read a whole floppy into an image file.
+  * @brief  Read a whole floppy into memory.
   *
   * The drive is opened read-only. A track that fails is read again sector by
   * sector, with retries; a sector that stays unreadable is zeros in the image
-  * and is listed in bad[]. The image is still written, so what can be saved of
+  * and is listed in bad[]. The image is still returned, so what can be saved of
   * a failing floppy is saved.
   *
   * @param  j Progress and result. Cleared here, except cancel.
   * @param  drive A drive's id.
-  * @param  out_path The image to write.
+  * @param  img Receives the image, which the caller frees; NULL if there is none.
+  * @param  len Receives its size.
+  *
+  * @retval FJOB_OK, also with bad sectors (see nbad), or an FJOB_E_ code.
+  */
+int fjob_read_mem( fjob *j, const char *drive, uint8_t **img, size_t *len );
+
+/**
+  * @brief  Read a whole floppy into an image file, as fjob_read_mem reads it.
+  *
+  * @param  j Progress and result. Cleared here, except cancel.
+  * @param  drive A drive's id.
+  * @param  out_path The image to write; refused before the drive is touched if
+  *         it is not an ordinary file.
   *
   * @retval FJOB_OK, also with bad sectors (see nbad), or an FJOB_E_ code.
   */
 int fjob_read( fjob *j, const char *drive, const char *out_path );
+
+/**
+  * @brief  Save an image in memory to a file.
+  *
+  * @param  img The image.
+  * @param  len Its size.
+  * @param  path The file: only ever an ordinary one.
+  * @param  msg Receives the outcome, for the user.
+  * @param  n Room in msg.
+  *
+  * @retval 0 if saved, or -1 with the reason in msg.
+  */
+int fjob_save( const uint8_t *img, size_t len, const char *path, char *msg, unsigned n );
 
 /**
   * @brief  Write an image file to a floppy and read it all back.

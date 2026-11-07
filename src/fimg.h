@@ -38,6 +38,10 @@
 #define FIMG_FAT_ROOT_ENTRIES 224
 #define FIMG_LABEL_LEN        11
 
+// Rows of a listing (fimg_list): far more than a floppy's list should need. The
+// last row says so if a list was cut.
+#define FIMG_LIST_MAX         4096
+
 //------------------------------------------------------------------------------
 //-------------------------------- Public types --------------------------------
 //------------------------------------------------------------------------------
@@ -63,6 +67,15 @@ typedef struct
 	uint32_t  free_bytes; // FAT: free space
 	char      text[1024]; // what to show the user, several lines
 } fimg_info;
+
+// One row of what an image holds.
+typedef struct
+{
+	char     name[32];  // a file's name, or "P000 Name" for what is in a bank
+	char     what[64];  // what it is
+	uint32_t size;      // in bytes; 0 when there is no size to show
+	int      inside;    // 1 if it is in the bank of the row above it
+} fimg_item;
 
 //------------------------------------------------------------------------------
 //--------------------------------- Public API ---------------------------------
@@ -227,5 +240,35 @@ uint32_t fimg_fat_sectors( size_t file_len );
   * @retval None.
   */
 void fimg_inspect( const uint8_t *img, size_t size, fimg_info *out );
+
+/**
+  * @brief  List what an image holds: its files, and the presets, samples and
+  *         sequences of its banks.
+  *
+  * The image may have come off a failing floppy, so nothing in it is trusted:
+  * a table of contents that makes no sense gives a shorter list, never a read
+  * outside the image. A bank's table of contents is at its start, so of a bank
+  * on several floppies only disk 1 can list it.
+  *
+  * @param  img The image.
+  * @param  size Its size.
+  * @param  out Receives the rows.
+  * @param  room Rows out can take; FIMG_LIST_MAX is plenty.
+  *
+  * @retval The number of rows; 0 if there is nothing to list.
+  */
+int fimg_list( const uint8_t *img, size_t size, fimg_item *out, int room );
+
+/**
+  * @brief  The file name to suggest for an image: the bank's name or the
+  *         floppy's label, with what a file name cannot hold replaced.
+  *
+  * @param  info What fimg_inspect said about the image.
+  * @param  out Receives the name, like "Bank_2of3.img", with no folder.
+  * @param  n Room in out.
+  *
+  * @retval None.
+  */
+void fimg_image_name( const fimg_info *info, char *out, size_t n );
 
 #endif

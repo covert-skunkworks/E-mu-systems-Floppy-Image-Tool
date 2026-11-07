@@ -5,7 +5,8 @@ the Ultra models. A window program (C, SDL2, [Nuklear](https://github.com/Immedi
 
 1. **makes floppy images**: blank, or holding files you pick;
 2. **writes an image to a real floppy**, then reads it all back and compares;
-3. **reads a real floppy to an image**, reporting any bad sectors.
+3. **reads a real floppy and shows what it holds** (files, and the presets, samples and sequences of banks), reporting any bad
+   sectors; you then choose whether to save it as an image.
 
 > This project is independent. It is not affiliated with, endorsed by or connected to E-mu Systems or Creative Technology
 > Ltd. E-mu, Emulator and EOS are trademarks of their owners, used here only to name the hardware. **No firmware, banks or disk
@@ -122,10 +123,15 @@ Double-click the program. Files can be dropped on the window.
 - **Write to floppy:** choose the drive, and what to write: what you just made, or an image file. **Write and verify...** names
   both in a box and asks first; its default is Cancel. After each disk of a set the page moves on to the next. The floppy must
   already be formatted: on the sampler, or on a PC.
-- **Read floppy:** choose the drive and the image file, **Read floppy**. A sector that stays unreadable after retries is saved as
-  zeros and listed with its cylinder, head and sector; the image is written anyway.
+- **Read floppy:** choose the drive, **Read floppy**. The floppy goes into memory and the page lists what it holds: its files, and
+  each bank's presets, samples and sequences with their sizes. Nothing is on the PC's disk until you press **Save as image file...**,
+  which suggests a name from the bank or label and also makes that file the Write page's image. A sector that stays unreadable after
+  retries becomes zeros and is listed with its cylinder, head and sector; you can still save the rest. The list comes from the
+  bank's table of contents at its start, so a bank on several floppies is listed by disk 1 only, and a bad sector there can cut the
+  list short (the page warns of this). Reading another floppy or quitting asks first if the last read was not saved.
 
-The same work from a command line (`floppy_image -help` lists it):
+The same work from a command line (`floppy_image -help` lists it). Here `-read` saves straight to the file you name, and `-info`
+lists an image as the Read page does:
 
 ```bash
 floppy_image -new eos -o bank.img MyBank.E4B

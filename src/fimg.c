@@ -68,6 +68,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 //------------------------------------------------------------------------------
@@ -94,6 +95,17 @@
 
 // In an E3S1 chunk's data: u16 index, name[16], then the u32 parameters.
 #define E3S1_PARAMS     18
+
+// A bank's table of contents, TOC1, is its first chunk. Each entry is big-endian:
+// tag[4], size, offset, u16 index, name[16], 2 more bytes.
+#define TOC_ENTRY       32
+#define TOC_INDEX       12
+#define TOC_NAME        14
+#define BANK_NAME_CHARS 16
+
+// How much of a file on a DOS floppy is read to list it: the table of contents is
+// at the start, and this has room for 8000 entries.
+#define FAT_HEAD_BYTES  ( 256u * 1024u )
 
 //------------------------------------------------------------------------------
 //------------------------------- Local functions ------------------------------
@@ -474,6 +486,252 @@ static void describe_fat( const uint8_t *img, fimg_info *out )
 			                       "%s  %u bytes\n", name, (unsigned)size );
 		}
 	}
+}
+
+/**
+  * @brief  Add a row to a listing. The last row that fits says if a list was cut.
+  *
+  * @param  out The rows.
+  * @param  n Rows so far.
+  * @param  room Rows out can take.
+  * @param  name The row's name.
+  * @param  what What it is.
+  * @param  size Its size, or 0.
+  * @param  inside Whether it is in the bank of the row above.
+  *
+  * @retval The rows now.
+  */
+static int item_add( fimg_item *out, int n, int room, const char *name, const char *what,
+                     uint32_t size, int inside )
+{
+	if ( n >= room )
+	{
+		return n;
+	}
+	if ( n == room - 1 )
+	{
+		name = "...";
+		what = "The list is too long to show all of it.";
+		size = 0;
+		inside = 0;
+	}
+	snprintf( out[n].name, sizeof out[n].name, "%s", name );
+	snprintf( out[n].what, sizeof out[n].what, "%s", what );
+	out[n].size = size;
+	out[n].inside = inside;
+	return n + 1;
+}
+
+/**
+  * @brief  Make printable text of a space-padded name from a floppy.
+  *
+  * @param  p The name.
+  * @param  len Its size at most.
+  * @param  out Receives the text, room for len + 1.
+  *
+  * @retval None.
+  */
+static void clean_text( const uint8_t *p, int len, char *out )
+{
+	int i, end = 0;
+
+	for ( i = 0; i < len && p[i] != 0; i++ )
+	{
+		out[i] = p[i] >= 0x20 && p[i] < 0x7F ? (char)p[i] : '?';
+		if ( p[i] != ' ' )
+		{
+			end = i + 1;
+		}
+	}
+	out[end] = 0;
+}
+
+/**
+  * @brief  Find a bank's table of contents.
+  *
+  * @param  bank The bank, or as much of it as there is.
+  * @param  len How much.
+  * @param  entries Receives the number of entries.
+  *
+  * @retval The first entry, or NULL if there is no table that fits.
+  */
+static const uint8_t *toc_find( const uint8_t *bank, size_t len, int *entries )
+{
+	uint32_t l;
+
+	if ( len < 20 || !fimg_is_bank( bank, len, NULL ) || memcmp( bank + 12, "TOC1", 4 ) != 0 )
+	{
+		return NULL;
+	}
+	l = rd32be( bank + 16 );
+	if ( l % TOC_ENTRY != 0 || l > len - 20 )
+	{
+		return NULL;
+	}
+	*entries = (int)( l / TOC_ENTRY );
+	return bank + 20;
+}
+
+/**
+  * @brief  Whether a table entry's tag is one: a bad sector reads as zeros, and
+  *         the entries after it cannot be trusted.
+  *
+  * @param  e The entry.
+  *
+  * @retval 1 if it is, 0 if not.
+  */
+static int toc_tag_ok( const uint8_t *e )
+{
+	return isalnum( e[0] ) && isalnum( e[1] ) && isalnum( e[2] ) && isalnum( e[3] );
+}
+
+/**
+  * @brief  What a table entry is, of the things worth listing.
+  *
+  * @param  e The entry.
+  * @param  letter Receives the letter EOS numbers it with.
+  *
+  * @retval Its description, or NULL for anything else.
+  */
+static const char *toc_kind( const uint8_t *e, char *letter )
+{
+	if ( memcmp( e, "E4P1", 4 ) == 0 )
+	{
+		*letter = 'P';
+		return "Preset";
+	}
+	if ( memcmp( e, "E3S1", 4 ) == 0 )
+	{
+		*letter = 'S';
+		return "Sample";
+	}
+	if ( memcmp( e, "E4s1", 4 ) == 0 )
+	{
+		*letter = 's';
+		return "Sequence";
+	}
+	return NULL;
+}
+
+/**
+  * @brief  Describe a bank in one line.
+  *
+  * @param  bank The bank, or as much of it as there is.
+  * @param  len How much.
+  * @param  form Its form type.
+  * @param  out Receives the description.
+  * @param  n Room in out.
+  *
+  * @retval None.
+  */
+static void bank_what( const uint8_t *bank, size_t len, const char *form, char *out, size_t n )
+{
+	int entries = 0, presets = 0, samples = 0, sequences = 0, i;
+	const uint8_t *toc = toc_find( bank, len, &entries );
+	char letter;
+
+	if ( toc == NULL )
+	{
+		snprintf( out, n, "Bank %s: its table of contents cannot be read", form );
+		return;
+	}
+	for ( i = 0; i < entries && toc_tag_ok( toc + i * TOC_ENTRY ); i++ )
+	{
+		if ( toc_kind( toc + i * TOC_ENTRY, &letter ) != NULL )
+		{
+			presets += letter == 'P';
+			samples += letter == 'S';
+			sequences += letter == 's';
+		}
+	}
+	if ( sequences > 0 )
+	{
+		snprintf( out, n, "Bank %s: %d preset%s, %d sample%s, %d sequence%s", form,
+		          presets, presets == 1 ? "" : "s", samples, samples == 1 ? "" : "s",
+		          sequences, sequences == 1 ? "" : "s" );
+	}
+	else
+	{
+		snprintf( out, n, "Bank %s: %d preset%s, %d sample%s", form,
+		          presets, presets == 1 ? "" : "s", samples, samples == 1 ? "" : "s" );
+	}
+}
+
+/**
+  * @brief  List what a bank holds, from its table of contents.
+  *
+  * @param  bank The bank, or as much of it as there is.
+  * @param  len How much.
+  * @param  out The rows.
+  * @param  n Rows so far.
+  * @param  room Rows out can take.
+  *
+  * @retval The rows now.
+  */
+static int list_bank( const uint8_t *bank, size_t len, fimg_item *out, int n, int room )
+{
+	int entries = 0, i;
+	const uint8_t *toc = toc_find( bank, len, &entries );
+
+	for ( i = 0; toc != NULL && i < entries; i++ )
+	{
+		const uint8_t *e = toc + i * TOC_ENTRY;
+		const char *what;
+		char letter, text[BANK_NAME_CHARS + 1], name[32];
+
+		if ( !toc_tag_ok( e ) )
+		{
+			break;
+		}
+		what = toc_kind( e, &letter );
+		if ( what == NULL )
+		{
+			continue;
+		}
+		clean_text( e + TOC_NAME, BANK_NAME_CHARS, text );
+		snprintf( name, sizeof name, "%c%03u %s", letter, (unsigned)( e[TOC_INDEX] << 8 | e[TOC_INDEX + 1] ), text );
+		n = item_add( out, n, room, name, what, rd32be( e + 4 ), 1 );
+	}
+	return n;
+}
+
+/**
+  * @brief  List the root of a DOS floppy, opening the banks.
+  *
+  * @param  img The image, of the layout fat_layout_ok knows.
+  * @param  out The rows.
+  * @param  room Rows out can take.
+  *
+  * @retval The rows.
+  */
+static int list_fat( const uint8_t *img, fimg_item *out, int room )
+{
+	uint8_t *head = malloc( FAT_HEAD_BYTES );
+	const uint8_t *e;
+	int i, n = 0;
+
+	for ( i = 0; ( e = root_file( img, i ) ) != NULL; i++ )
+	{
+		int dir = ( e[11] & ATTR_DIR ) != 0, bank;
+		uint32_t size = dir ? 0 : rd32le( e + 28 );
+		size_t len = size < FAT_HEAD_BYTES ? size : FAT_HEAD_BYTES;
+		char name[13], text[13], what[64], form[5];
+
+		short_text( e, name );
+		clean_text( (const uint8_t *)name, 12, text );
+		bank = !dir && head != NULL && fimg_fat_read( img, i, head, len ) == 0 && fimg_is_bank( head, len, form );
+		if ( bank )
+		{
+			bank_what( head, len, form, what, sizeof what );
+		}
+		n = item_add( out, n, room, text, bank ? what : dir ? "Folder" : "File", size, 0 );
+		if ( bank )
+		{
+			n = list_bank( head, len, out, n, room );
+		}
+	}
+	free( head );
+	return n;
 }
 
 //------------------------------------------------------------------------------
@@ -907,5 +1165,74 @@ void fimg_inspect( const uint8_t *img, size_t size, fimg_info *out )
 
 		snprintf( out->text + k, sizeof out->text - k,
 		          "\n720 KB: no EOS tested reads this size." );
+	}
+}
+
+int fimg_list( const uint8_t *img, size_t size, fimg_item *out, int room )
+{
+	fimg_info info;
+	int n = 0;
+
+	fimg_inspect( img, size, &info );
+	if ( info.kind == FIMG_KIND_EOS_BANK )
+	{
+		size_t len = size - FIMG_SECTOR;
+		char name[BANK_NAME_CHARS + 1], form[5], what[64];
+
+		clean_text( (const uint8_t *)info.name, BANK_NAME_CHARS, name );
+		clean_text( (const uint8_t *)info.form, 4, form );
+		if ( info.bank_bytes < len )
+		{
+			len = info.bank_bytes;
+		}
+		if ( info.disk > 1 )
+		{
+			snprintf( what, sizeof what, "Bank %s, disk %d of %d: disk 1 lists it", form, info.disk, info.disks );
+			n = item_add( out, n, room, name, what, info.bank_bytes, 0 );
+		}
+		else
+		{
+			bank_what( img + FIMG_SECTOR, len, form, what, sizeof what );
+			n = item_add( out, n, room, name, what, info.bank_bytes, 0 );
+			n = list_bank( img + FIMG_SECTOR, len, out, n, room );
+		}
+	}
+	else if ( info.kind == FIMG_KIND_FAT12 && size == FIMG_SIZE_144 && fat_layout_ok( img ) )
+	{
+		n = list_fat( img, out, room );
+	}
+	if ( size == FIMG_SIZE_720 )
+	{
+		n = item_add( out, n, room, "720 KB floppy", "No EOS tested reads this size", 0, 0 );
+	}
+	return n;
+}
+
+void fimg_image_name( const fimg_info *info, char *out, size_t n )
+{
+	const char *from = info->kind == FIMG_KIND_EOS_BANK || info->kind == FIMG_KIND_FAT12 ? info->name : "";
+	char base[FIMG_BANK_NAME_LEN + 1];
+	int i;
+
+	// the name comes from the floppy, so it may hold anything
+	for ( i = 0; i < FIMG_BANK_NAME_LEN && from[i]; i++ )
+	{
+		uint8_t c = (uint8_t)from[i];
+
+		base[i] = c < 0x20 || c >= 0x7F || strchr( "<>:\"/\\|?*", c ) != NULL ? '_' : (char)c;
+	}
+	// Windows drops these from the end of a name, which would leave ".." as the parent folder
+	while ( i > 0 && ( base[i - 1] == ' ' || base[i - 1] == '.' ) )
+	{
+		i--;
+	}
+	base[i] = 0;
+	if ( info->kind == FIMG_KIND_EOS_BANK && info->disks > 1 )
+	{
+		snprintf( out, n, "%s_%dof%d.img", i > 0 ? base : "floppy", info->disk, info->disks );
+	}
+	else
+	{
+		snprintf( out, n, "%s.img", i > 0 ? base : "floppy" );
 	}
 }

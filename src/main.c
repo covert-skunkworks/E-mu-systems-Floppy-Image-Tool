@@ -7,7 +7,8 @@
 //		A write from the command line needs -yes as well as the drive: there is
 //		no box to ask in.
 //
-//		Only the test builds (FDR_TEST_DRIVE) know the -fake and -click options.
+//		Only the test builds (FDR_TEST_DRIVE) know the -fake, -click and -shot
+//		options.
 //
 
 //------------------------------------------------------------------------------
@@ -53,7 +54,8 @@ static const char usage_text[] =
 	"                                        no bank makes a blank floppy\n"
 	"  floppy_image -new dos -o OUT.img [-label LABEL] [FILE...]\n"
 	"                                        a DOS (FAT12) floppy holding the files\n"
-	"  floppy_image -info IMAGE              what an image holds\n"
+	"  floppy_image -info IMAGE              what an image holds: its files, and the\n"
+	"                                        presets, samples and sequences of banks\n"
 	"  floppy_image -drives                  the floppy drives\n"
 	"  floppy_image -read DRIVE OUT.img      save a floppy; the drive stays read-only\n"
 	"  floppy_image -write DRIVE IMAGE -yes  write an image, then verify it\n"
@@ -63,7 +65,8 @@ static const char usage_text[] =
 #ifdef FDR_TEST_DRIVE
 	"\n"
 	"  Test build: -fake FILE[:bad=N,N][:flip=N,N] first adds a stand-in drive, an\n"
-	"  ordinary file; -click FRAME:X:Y among PAGES scripts a mouse click.\n"
+	"  ordinary file; among PAGES, -click FRAME:X:Y scripts a mouse click and\n"
+	"  -shot FRAME chooses the frame -smoke saves.\n"
 #endif
 	;
 
@@ -227,9 +230,11 @@ static int cmd_new( int argc, char **argv, const char *fmt )
   */
 static int cmd_info( const char *path )
 {
+	static fimg_item items[FIMG_LIST_MAX];
 	uint8_t *d = NULL;
 	size_t len = 0;
 	fimg_info info;
+	int i, n;
 
 	if ( fplat_read_file( path, &d, &len, FIMG_SIZE_144 ) != 0 )
 	{
@@ -237,8 +242,18 @@ static int cmd_info( const char *path )
 		return 1;
 	}
 	fimg_inspect( d, len, &info );
+	n = fimg_list( d, len, items, FIMG_LIST_MAX );
 	free( d );
-	printf( "%s\n", info.text );
+	printf( "%.*s\n", (int)strcspn( info.text, "\n" ), info.text );
+	for ( i = 0; i < n; i++ )
+	{
+		printf( "%s%-24s  %s", items[i].inside ? "  " : "", items[i].name, items[i].what );
+		if ( items[i].size > 0 )
+		{
+			printf( "  (%u bytes)", (unsigned)items[i].size );
+		}
+		printf( "\n" );
+	}
 	return info.kind == FIMG_KIND_UNKNOWN;
 }
 
@@ -347,6 +362,10 @@ int main( int argc, char **argv )
 				{
 					fgui_test_click( f, x, y );
 				}
+			}
+			else if ( strcmp( argv[i], "-shot" ) == 0 )
+			{
+				fgui_test_shot( atoi( argv[++i] ) );
 			}
 #endif
 			else if ( strcmp( argv[i], "-tab" ) == 0 )

@@ -357,13 +357,9 @@ int fjob_set_save( const fjob_set *s, const char *path, char *msg, unsigned n )
 	}
 	for ( d = 1; d <= s->disks; d++ )
 	{
-		int rc;
-
 		fjob_disk_path( path, d, s->disks, name, sizeof name );
-		rc = fplat_write_file( name, fjob_set_disk( s, d ), FIMG_SIZE_144 );
-		if ( rc != 0 )
+		if ( fjob_save( fjob_set_disk( s, d ), FIMG_SIZE_144, name, msg, n ) != 0 )
 		{
-			snprintf( msg, n, rc == -2 ? "Refused: %s is not an ordinary file." : "Cannot write %s.", name );
 			return -1;
 		}
 	}
@@ -394,12 +390,30 @@ void fjob_chs( int sector, int spt, char *out, unsigned n )
 	snprintf( out, n, "%d/%d/%d", c, rest / spt, rest % spt + 1 );
 }
 
+int fjob_save( const uint8_t *img, size_t len, const char *path, char *msg, unsigned n )
+{
+	int rc = fplat_write_file( path, img, len );
+
+	if ( rc == -2 )
+	{
+		snprintf( msg, n, "Refused: %s is not an ordinary file.", path );
+	}
+	else if ( rc != 0 )
+	{
+		snprintf( msg, n, "Cannot write %s.", path );
+	}
+	else
+	{
+		snprintf( msg, n, "Saved %s.", fplat_base( path ) );
+	}
+	return rc != 0 ? -1 : 0;
+}
+
 int fjob_read( fjob *j, const char *drive, const char *out_path )
 {
-	fdr_handle *h;
-	uint8_t *img;
-	int rc, s, sectors, spt;
-	char err[256] = "";
+	uint8_t *img = NULL;
+	size_t len = 0;
+	int rc;
 
 	job_reset( j );
 	// before the drive, not after a read that can take minutes
@@ -408,6 +422,41 @@ int fjob_read( fjob *j, const char *drive, const char *out_path )
 		snprintf( j->message, sizeof j->message, "Refused: %s is not an ordinary file.", out_path );
 		return job_end( j, FJOB_E_OUTPUT );
 	}
+	rc = fjob_read_mem( j, drive, &img, &len );
+	if ( rc != FJOB_OK )
+	{
+		return rc;
+	}
+	rc = fjob_save( img, len, out_path, j->message, sizeof j->message );
+	free( img );
+	if ( rc != 0 )
+	{
+		return job_end( j, FJOB_E_OUTPUT );
+	}
+	if ( j->nbad )
+	{
+		snprintf( j->message, sizeof j->message,
+		          "Saved %s with %d unreadable sector(s), zeros in the image.",
+		          fplat_base( out_path ), j->nbad );
+	}
+	else
+	{
+		snprintf( j->message, sizeof j->message, "Saved %s: all %d sectors read.",
+		          fplat_base( out_path ), j->total );
+	}
+	return job_end( j, FJOB_OK );
+}
+
+int fjob_read_mem( fjob *j, const char *drive, uint8_t **img_out, size_t *len )
+{
+	fdr_handle *h;
+	uint8_t *img;
+	int rc, s, sectors, spt;
+	char err[256] = "";
+
+	job_reset( j );
+	*img_out = NULL;
+	*len = 0;
 	rc = fdr_open( drive, 0, &h, err, sizeof err );
 	if ( rc != 0 )
 	{
@@ -434,26 +483,19 @@ int fjob_read( fjob *j, const char *drive, const char *out_path )
 	if ( j->cancel )
 	{
 		free( img );
-		snprintf( j->message, sizeof j->message, "Cancelled: no image was written." );
+		snprintf( j->message, sizeof j->message, "Cancelled: nothing was kept of this read." );
 		return job_end( j, FJOB_E_CANCELLED );
 	}
-	if ( fplat_write_file( out_path, img, (size_t)sectors * FIMG_SECTOR ) != 0 )
-	{
-		free( img );
-		snprintf( j->message, sizeof j->message, "Cannot write %s.", out_path );
-		return job_end( j, FJOB_E_OUTPUT );
-	}
-	free( img );
+	*img_out = img;
+	*len = (size_t)sectors * FIMG_SECTOR;
 	if ( j->nbad )
 	{
 		snprintf( j->message, sizeof j->message,
-		          "Saved %s with %d unreadable sector(s), zeros in the image.",
-		          fplat_base( out_path ), j->nbad );
+		          "Read, with %d unreadable sector(s): zeros in the image.", j->nbad );
 	}
 	else
 	{
-		snprintf( j->message, sizeof j->message, "Saved %s: all %d sectors read.",
-		          fplat_base( out_path ), sectors );
+		snprintf( j->message, sizeof j->message, "Read: all %d sectors.", sectors );
 	}
 	return job_end( j, FJOB_OK );
 }
