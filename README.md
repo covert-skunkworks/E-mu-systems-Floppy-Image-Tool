@@ -184,16 +184,11 @@ Nuklear and the font are in `third_party/`; only SDL2 comes from the system.
 
 `make test` runs the unit tests, which need neither SDL nor a drive. `tests/README.md` has the rest.
 
-## Releases
+## Pricing
 
-Every push builds all three systems and runs the tests in GitHub Actions. To make a release:
+This tool is provided to everyone for free, however if you would like to say thanks or help support continued development of this and projects to come, feel free to send a coffee:
 
-```bash
-bash scripts/release.sh 1.1 --push
-```
-
-That builds and tests this system's package, asks, then tags `v1.1` and pushes the tag; Actions builds all three systems and
-publishes a GitHub Release. Packages hold the program, a README and licences.
+[<img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="BuyMeACoffee" width="100">](https://www.buymeacoffee.com/covert.skunkworks)
 
 ## Licence
 
