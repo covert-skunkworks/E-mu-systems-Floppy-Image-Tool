@@ -1,0 +1,181 @@
+name: build
+
+# Every push / pull request: build, unit-test, smoke-test and package all three systems; the packages (and the smoke
+# tests' screenshots) are kept as the run's artifacts. Pushing a tag v* (e.g. v1.1) also publishes the packages as a
+# GitHub Release (scripts/release.sh VERSION --push does the tagging).
+#
+# Each package (scripts/package.sh) is one folder: the program, README.txt and licences.
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    # Pinned rather than -latest: the build stays reproducible, and the older glibc (2.35) lets the program run on more
+    # distributions.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libsdl2-dev xvfb
+      - name: Version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="dev-${GITHUB_SHA::7}"; fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+      - run: make -j4 VERSION="$VERSION"
+      - name: Unit tests
+        run: make test
+      # Starts the program on a virtual display, draws each page, exits.
+      - name: Smoke test
+        timeout-minutes: 2
+        run: |
+          mkdir -p build
+          for t in 0 1 2; do xvfb-run -a ./floppy_image -smoke build/shot-linux-$t.bmp -tab $t; done
+          test -s build/shot-linux-0.bmp && test -s build/shot-linux-1.bmp && test -s build/shot-linux-2.bmp
+      - name: Package
+        run: bash scripts/package.sh linux "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-linux
+          path: dist/*
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshot-linux
+          path: build/shot-*.bmp
+
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          # UCRT64 is MSYS2's recommended environment (MINGW64 is deprecated).
+          msystem: UCRT64
+          update: true
+          install: >-
+            make
+            zip
+            curl
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-SDL2
+      - name: Version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="dev-${GITHUB_SHA::7}"; fi
+          echo "$v" > version.txt
+      - run: make -j4 VERSION="$(cat version.txt)"
+      - name: Unit tests
+        run: make test
+      - name: Smoke test
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build | Out-Null
+          foreach ($t in 0,1,2) {
+            $p = Start-Process -PassThru -Wait ./floppy_image.exe -ArgumentList "-smoke build/shot-windows-$t.bmp -tab $t"
+            if ($p.ExitCode -ne 0 -or -not (Test-Path "build/shot-windows-$t.bmp")) { throw "page $t did not draw (exit $($p.ExitCode))" }
+          }
+      # The .exe is fully static: nothing else is needed to run it.
+      - name: Package
+        run: bash scripts/package.sh windows "$(cat version.txt)"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-windows
+          path: dist/*
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshot-windows
+          path: build/shot-*.bmp
+
+  macos:
+    # Image making only on macOS: fdrive.c explains why there is no raw floppy access.
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      SDL_VERSION: 2.32.10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then v="${GITHUB_REF_NAME#v}"; else v="dev-${GITHUB_SHA::7}"; fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+      # SDL2 is built from the official source as a static, universal library. Homebrew's sdl2 is now sdl2-compat, which
+      # loads SDL3 at run time and cannot be bundled reliably; static linking needs no bundled dylibs at all and gives
+      # one program for Apple Silicon and Intel.
+      - name: Build static SDL2
+        run: |
+          curl -fsSL -o sdl.tar.gz \
+            "https://github.com/libsdl-org/SDL/releases/download/release-${SDL_VERSION}/SDL2-${SDL_VERSION}.tar.gz"
+          tar -xzf sdl.tar.gz
+          cmake -S "SDL2-${SDL_VERSION}" -B sdl-build -DCMAKE_BUILD_TYPE=Release \
+                -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST=OFF \
+                -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+                -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+          cmake --build sdl-build --parallel
+          cmake --install sdl-build --prefix "$PWD/sdl"
+      - name: Build
+        run: |
+          SDL_LIBS="$(sdl/bin/sdl2-config --static-libs)"
+          echo "SDL_LIBS=$SDL_LIBS"
+          if [ -z "$SDL_LIBS" ]; then echo "sdl2-config returned no flags"; exit 1; fi
+          # DEPFLAGS empty: a compiler given two -arch flags cannot write one dependency file
+          make -j4 VERSION="$VERSION" DEPFLAGS= \
+               CC="clang -arch arm64 -arch x86_64 -mmacosx-version-min=11.0" \
+               SDL_CONFIG="$PWD/sdl/bin/sdl2-config" SDL_LIBS="$SDL_LIBS"
+          lipo -info floppy_image
+      - name: Unit tests
+        run: make test DEPFLAGS=
+      - name: Package
+        run: bash scripts/package.sh macos "$VERSION"
+      - name: Check the program needs only system libraries
+        run: |
+          mkdir -p check && ditto -x -k dist/*.zip check
+          bin=$(echo check/*/floppy_image.app/Contents/MacOS/floppy_image)
+          otool -L "$bin"
+          if otool -L "$bin" | grep -E '^[[:space:]]' | grep -vE '^[[:space:]]*(/System/Library/|/usr/lib/)'; then
+            echo "the program depends on a library outside macOS"; exit 1
+          fi
+      - name: Smoke test
+        timeout-minutes: 2
+        run: |
+          mkdir -p build
+          bin=$(echo check/*/floppy_image.app/Contents/MacOS/floppy_image)
+          for t in 0 1 2; do "$bin" -smoke build/shot-macos-$t.bmp -tab $t; done
+          test -s build/shot-macos-0.bmp && test -s build/shot-macos-1.bmp && test -s build/shot-macos-2.bmp
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-macos
+          path: dist/*
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screenshot-macos
+          path: build/shot-*.bmp
+
+  release:
+    timeout-minutes: 10
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # needed to create the release
+    steps:
+      - uses: actions/checkout@v4   # for release/NOTES.md
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          body_path: release/NOTES.md
+          generate_release_notes: true

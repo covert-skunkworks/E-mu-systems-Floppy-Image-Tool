@@ -1,0 +1,19 @@
+build/
+build-*/
+dist/
+floppy_image
+floppy_image.exe
+*.o
+*.d
+version.txt
+
+# images and banks do not belong in this repository
+*.img
+*.ima
+*.flp
+*.e4b
+*.E4B
+*.e4r
+*.E4R
+*.bin
+*.bmp

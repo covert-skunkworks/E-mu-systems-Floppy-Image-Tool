@@ -1,0 +1,4 @@
+# Line endings fixed in the repository: Windows checkouts can turn LF into CRLF, and bash then cannot run the scripts.
+* text=auto eol=lf
+*.ico binary
+*.ttf binary
